@@ -28,6 +28,8 @@ class VoiceTranscriber:
         self.sample_rate = 16000  # Whisper expects 16kHz
         self.model = None
         self.current_keys = set()
+        self.stream = None
+        self.stream_error = False
 
         print(f"Loading Whisper {model_size} model...")
         print("This may take a moment on first run (downloading model)...")
@@ -40,13 +42,44 @@ class VoiceTranscriber:
     def audio_callback(self, indata, frames, time_info, status):
         """Callback function for audio stream - captures audio while recording."""
         if status:
+            # Check for critical audio errors (device disconnected after sleep)
+            if 'Error' in str(status):
+                self.stream_error = True
             print(f"Audio status: {status}", file=sys.stderr)
         if self.is_recording:
             self.audio_data.append(indata.copy())
 
+    def restart_audio_stream(self):
+        """Restart the audio stream (useful after laptop wakes from sleep)."""
+        try:
+            if self.stream:
+                print("🔄 Restarting audio stream...")
+                self.stream.stop()
+                self.stream.close()
+
+            self.stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                callback=self.audio_callback,
+                dtype=np.float32
+            )
+            self.stream.start()
+            self.stream_error = False
+            print("✅ Audio stream restarted successfully")
+        except Exception as e:
+            print(f"❌ Failed to restart audio stream: {e}")
+            self.stream_error = True
+
     def start_recording(self):
         """Start recording audio."""
         if not self.is_recording:
+            # Check if stream needs to be restarted
+            if self.stream_error or not self.stream or not self.stream.active:
+                self.restart_audio_stream()
+                if self.stream_error:
+                    print("❌ Cannot record - audio stream not available")
+                    return
+
             self.is_recording = True
             self.audio_data = []
             print("\n🎤 Recording... (release key to transcribe)")
@@ -132,10 +165,17 @@ class VoiceTranscriber:
             # Add key to current keys
             self.current_keys.add(key)
 
-            # Check for Ctrl+Shift combination (both pressed together)
+            # Check for Ctrl+Shift+Esc to exit
+            if (keyboard.Key.ctrl_l in self.current_keys or keyboard.Key.ctrl in self.current_keys) and \
+               (keyboard.Key.shift_l in self.current_keys or keyboard.Key.shift in self.current_keys) and \
+               (key == keyboard.Key.esc):
+                print("\n👋 Exiting...")
+                return False
+
+            # Check for Ctrl+Shift combination (both pressed together) to record
             if (keyboard.Key.ctrl_l in self.current_keys or keyboard.Key.ctrl in self.current_keys) and \
                (keyboard.Key.shift_l in self.current_keys or keyboard.Key.shift in self.current_keys):
-                if not self.is_recording:
+                if not self.is_recording and key != keyboard.Key.esc:
                     self.start_recording()
         except AttributeError:
             pass
@@ -151,10 +191,6 @@ class VoiceTranscriber:
             # Remove key from current keys
             if key in self.current_keys:
                 self.current_keys.remove(key)
-
-            # Exit on ESC
-            if key == keyboard.Key.esc:
-                return False
         except AttributeError:
             pass
 
@@ -166,19 +202,19 @@ class VoiceTranscriber:
         print("Hotkey: Ctrl+Shift")
         print("Press and HOLD Ctrl+Shift to record")
         print("RELEASE either key to stop recording and transcribe")
-        print("Press ESC to quit")
+        print("Press Ctrl+Shift+Esc to quit")
         print("="*60 + "\n")
 
         # Open audio stream
         try:
-            stream = sd.InputStream(
+            self.stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
                 callback=self.audio_callback,
                 dtype=np.float32
             )
 
-            stream.start()
+            self.stream.start()
             print("✅ Ready! Waiting for hotkey...")
 
             # Set up keyboard listener
@@ -188,18 +224,24 @@ class VoiceTranscriber:
             ) as listener:
                 listener.join()
 
-            stream.stop()
-            stream.close()
+            self.stream.stop()
+            self.stream.close()
             print("\n\n👋 Shutting down...")
 
         except KeyboardInterrupt:
             print("\n\n👋 Shutting down...")
+            if self.stream:
+                self.stream.stop()
+                self.stream.close()
         except Exception as e:
             print(f"\n❌ Error: {e}")
             print("\nTroubleshooting:")
             print("1. Make sure you've granted microphone permissions")
             print("2. Check that no other app is using the microphone")
             print("3. Try running with 'sudo' if you get permission errors")
+            if self.stream:
+                self.stream.stop()
+                self.stream.close()
 
 
 def main():
